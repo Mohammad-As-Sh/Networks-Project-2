@@ -1,0 +1,20 @@
+Line 1: The UDP header is 8 bytes, containing Source Port, Destination Port, Length, and Checksum fields.
+Line 2: TCP is a connection-oriented protocol, ensuring reliable, ordered, and error-checked delivery of data.
+Line 3: The TCP three-way handshake consists of SYN, SYN-ACK, and ACK packets to establish a connection.
+Line 4: The OSI model describes networking in seven layers: Physical, Data Link, Network, Transport, Session, Presentation, and Application.
+Line 5: An IP address is a logical address used to identify a device on a network, like the internet.
+Line 6: A MAC address is a unique 48-bit hardware address assigned to a network interface controller (NIC).
+Line 7: Routers operate at the Network Layer (Layer 3) to forward packets between different networks.
+Line 8: Switches operate at the Data Link Layer (Layer 2) to forward frames between devices on the same local network.
+Line 9: DNS (Domain Name System) translates human-readable domain names (e.g., https://www.google.com/search?q=www.google.com) into IP addresses.
+Line 10: DHCP (Dynamic Host Configuration Protocol) automatically assigns IP addresses to devices on a network.
+Line 11: IPv4 addresses are 32 bits long, while the newer IPv6 addresses are 128 bits long to support more devices.
+Line 12: Port numbers are used at the Transport Layer to identify specific applications or services on a host.
+Line 13: NAT (Network Address Translation) allows multiple devices in a private network to share a single public IP address.
+Line 14: The ARP (Address Resolution Protocol) is used to map a known IP address to its corresponding MAC address on a local network.
+Line 15: ICMP (Internet Control Message Protocol) is used for network diagnostics; the 'ping' command is a common example.
+Line 16: Bandwidth refers to the maximum rate at which data can be transferred across a network path.
+Line 17: Latency, or ping time, is the delay it takes for a data packet to travel from its source to its destination.
+Line 18: The default port for HTTP is 80, while the secure version, HTTPS, uses port 443.
+Line 19: TCP uses a sliding window mechanism for flow control to prevent the sender from overwhelming the receiver.
+Line 20: A subnet mask is used to divide an IP address into a network portion and a host portion.
