@@ -13,6 +13,18 @@
 #include "common.h"
 #include "packet.h"
 
+#define WND 10  // Receiver buffer size, same as the sender's window
+
+/* One slot of the receiver buffer: an out-of-order packet we are holding */
+typedef struct {
+  int used;                  // 0 = empty slot, 1 = holding a packet
+  int seqno;                 // Sequence number (byte offset) of the packet
+  int len;                   // Payload size
+  char data[MAX_DATA_SIZE];  // The payload itself
+} BufferSlot;
+
+BufferSlot buffer_slots[WND];
+
 int main(int argc, char** argv) {
   int sockfd;
   int portno;
@@ -41,6 +53,11 @@ int main(int argc, char** argv) {
   VLOG(LOG_INFO, "Output file will be saved to: %s", filepath);
   fd = open(filepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
   if (fd < 0) error(argv[2]);
+
+  // All buffer slots start out empty
+  for (int i = 0; i < WND; i++) {
+    buffer_slots[i].used = 0;
+  }
 
   // socket: create the socket
   sockfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -82,34 +99,90 @@ int main(int argc, char** argv) {
     recvpkt = (tcp_packet*)buffer;
     assert(get_data_size(recvpkt) <= MAX_DATA_SIZE);
 
-    // handle in-order vs. duplicate packets
+    int seqno = recvpkt->hdr.seqno;
+    int len = recvpkt->hdr.data_size;
     int is_eof = 0;
-    if (recvpkt->hdr.seqno == expected_seqno) {
-      // This is the packet we were waiting for
-      VLOG(LOG_DEBUG, "Received expected packet %d", expected_seqno);
-      if (recvpkt->hdr.data_size > 0) {
-        if (pwrite(fd, recvpkt->data, recvpkt->hdr.data_size, recvpkt->hdr.seqno) < 0) {
-          error("ERROR in pwrite");
-        }
+    int send_ack = 1;
+
+    if (seqno == expected_seqno) {
+      // This is the packet we were waiting for, so write it straight to the file
+      VLOG(LOG_DEBUG, "Received expected packet %d", seqno);
+      if (len > 0) {
+        if (pwrite(fd, recvpkt->data, len, seqno) < 0) error("ERROR in pwrite");
+        expected_seqno += len;
       } else {
-        is_eof = 1;
+        is_eof = 1;  // A packet with no data marks the end of the file
       }
-      // Update our state to expect the next packet
-      expected_seqno += recvpkt->hdr.data_size;
+
+      // Now deliver any buffered packets that come right after it.
+      // Keep looping because each delivery can unlock the next one.
+      int found = 1;
+      while (found && !is_eof) {
+        found = 0;
+        for (int i = 0; i < WND; i++) {
+          if (buffer_slots[i].used && buffer_slots[i].seqno == expected_seqno) {
+            if (buffer_slots[i].len > 0) {
+              if (pwrite(fd, buffer_slots[i].data, buffer_slots[i].len, buffer_slots[i].seqno) < 0) {
+                error("ERROR in pwrite");
+              }
+              VLOG(LOG_DEBUG, "Delivered buffered packet %d", buffer_slots[i].seqno);
+              expected_seqno += buffer_slots[i].len;
+            } else {
+              is_eof = 1;  // The end of file packet was buffered earlier
+            }
+            buffer_slots[i].used = 0;
+            found = 1;
+            break;
+          }
+        }
+      }
+    } else if (seqno > expected_seqno) {
+      // Out of order packet. We must not throw it away, so keep it in memory.
+      int already_buffered = 0;
+      for (int i = 0; i < WND; i++) {
+        if (buffer_slots[i].used && buffer_slots[i].seqno == seqno) already_buffered = 1;
+      }
+
+      if (already_buffered) {
+        VLOG(LOG_DEBUG, "Packet %d is already in the buffer. Re-sending ACK.", seqno);
+      } else {
+        // Find a free slot to store it in
+        int slot = -1;
+        for (int i = 0; i < WND; i++) {
+          if (!buffer_slots[i].used) {
+            slot = i;
+            break;
+          }
+        }
+
+        if (slot == -1) {
+          // No room left. Drop it without an ACK so the sender sends it again later.
+          VLOG(LOG_WARNING, "Buffer is full, dropping packet %d", seqno);
+          send_ack = 0;
+        } else {
+          buffer_slots[slot].used = 1;
+          buffer_slots[slot].seqno = seqno;
+          buffer_slots[slot].len = len;
+          if (len > 0) memcpy(buffer_slots[slot].data, recvpkt->data, len);
+          VLOG(LOG_INFO, "Buffered out of order packet %d (expected %d) in slot %d", seqno, expected_seqno, slot);
+        }
+      }
     } else {
-      VLOG(LOG_INFO, "Received duplicate/old packet %d (expected %d). Re-sending ACK.",
-           recvpkt->hdr.seqno, expected_seqno);
+      // Old packet we have already written. Just ACK it again so the sender stops resending.
+      VLOG(LOG_INFO, "Received duplicate/old packet %d (expected %d). Re-sending ACK.", seqno, expected_seqno);
     }
 
-    // Send ACK for what the sender *thinks* it sent.
-    // If it was a duplicate, this re-sends the needed ACK.
-    sndpkt = make_packet(0);
-    sndpkt->hdr.ackno = recvpkt->hdr.seqno + recvpkt->hdr.data_size;
-    sndpkt->hdr.ctr_flags = CTRL_FLAG_ACK;
-    if (sendto(sockfd, sndpkt, TCP_HDR_SIZE, 0, (struct sockaddr*)&clientaddr, clientlen) < 0) {
-      error("ERROR in sendto");
+    // ACK every packet we accepted, in order or not.
+    // The ACK carries seqno + data_size, which is what the sender matches against.
+    if (send_ack) {
+      sndpkt = make_packet(0);
+      sndpkt->hdr.ackno = seqno + len;
+      sndpkt->hdr.ctr_flags = CTRL_FLAG_ACK;
+      if (sendto(sockfd, sndpkt, TCP_HDR_SIZE, 0, (struct sockaddr*)&clientaddr, clientlen) < 0) {
+        error("ERROR in sendto");
+      }
+      free(sndpkt);
     }
-    free(sndpkt);
 
     if (is_eof) {
       VLOG(LOG_INFO, "End Of File packet acknowledged. Transfer complete. Shutting down.");
