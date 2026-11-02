@@ -1,0 +1,5 @@
+*.o
+starter/build/rdt_sender
+starter/build/rdt_receiver
+starter/build/receiveddata/*
+!starter/build/receiveddata/.gitkeep

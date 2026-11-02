@@ -17,7 +17,7 @@
 
 #define WND 10           // Sliding window size (10 packets in flight)
 #define RETRY 150        // Timeout in milliseconds (150 ms)
-#define MAX_TIMEOUTS 30  // Maximum number of re-transmissions per packet before giving up
+#define MAX_TIMEOUTS 100  // Maximum number of re-transmissions per packet before giving up
 
 /* Structure to track each packet inside the sender's sliding window */
 typedef struct {
@@ -98,8 +98,16 @@ int main(int argc, char** argv) {
 
     // 1. SLIDING WINDOW SENDER (Pipelining):
     while (!eof_sent && (next_seqno < send_base + WND * MAX_DATA_SIZE)) {
-      // FIX: Use sequential slot assignment instead of sequence number division to prevent overwriting!
+      // Slots are handed out in order, one per packet sent.
       int index = total_packets_sent % WND;
+
+      // The window is measured in bytes, but the last packet of the file is
+      // usually shorter than MAX_DATA_SIZE. That makes the byte test allow one
+      // more packet than we have slots, which would overwrite a slot that still
+      // holds an unacknowledged packet and lose it for good. Stop if the slot we
+      // are about to use is still waiting for its ACK.
+      if (window[index].pkt != NULL) break;
+
       total_packets_sent++;
 
       len = read(fd, buffer, MAX_DATA_SIZE);
@@ -153,13 +161,10 @@ int main(int argc, char** argv) {
         // SELECTIVE REPEAT: Match the exact packet boundary being acknowledged
         for (int i = 0; i < WND; i++) {
           if (window[i].pkt != NULL && !window[i].acked) {
-            int expected_ack = window[i].seqno + (window[i].len > 0 ? window[i].len : 0);
+            int expected_ack = window[i].seqno;
             if (ackno == expected_ack) {
               window[i].acked = 1;
               VLOG(LOG_DEBUG, "Packet %d successfully acknowledged", window[i].seqno);
-              if (window[i].len == 0) {
-                eof_acked = 1;
-              }
             }
           }
         }

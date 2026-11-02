@@ -13,7 +13,9 @@
 #include "common.h"
 #include "packet.h"
 
-#define WND 10  // Receiver buffer size, same as the sender's window
+#define WND 10              // Receiver buffer size, same as the sender's window
+#define LINGER_MAX_MS 15000  // Longest we keep answering ACKs after the file is done
+#define LINGER_QUIET_MS 2000 // Leave early once the sender has been quiet this long
 
 /* One slot of the receiver buffer: an out-of-order packet we are holding */
 typedef struct {
@@ -173,10 +175,11 @@ int main(int argc, char** argv) {
     }
 
     // ACK every packet we accepted, in order or not.
-    // The ACK carries seqno + data_size, which is what the sender matches against.
+    // The ACK carries the sequence number of that exact packet, so the sender
+    // knows which one of the packets in its window was delivered.
     if (send_ack) {
       sndpkt = make_packet(0);
-      sndpkt->hdr.ackno = seqno + len;
+      sndpkt->hdr.ackno = seqno;
       sndpkt->hdr.ctr_flags = CTRL_FLAG_ACK;
       if (sendto(sockfd, sndpkt, TCP_HDR_SIZE, 0, (struct sockaddr*)&clientaddr, clientlen) < 0) {
         error("ERROR in sendto");
@@ -185,8 +188,45 @@ int main(int argc, char** argv) {
     }
 
     if (is_eof) {
-      VLOG(LOG_INFO, "End Of File packet acknowledged. Transfer complete. Shutting down.");
+      VLOG(LOG_INFO, "End Of File packet acknowledged. Transfer complete.");
       close(fd);
+
+      // Some of our ACKs may have been lost on the way back, so the sender can
+      // still be resending packets we already have. If we exit right now those
+      // packets get no reply at all and the sender keeps retrying until it gives
+      // up. Instead we stay for a short while and answer whatever arrives.
+      struct timeval start, last_heard, now;
+      gettimeofday(&start, NULL);
+      last_heard = start;
+      while (1) {
+        gettimeofday(&now, NULL);
+        long elapsed_ms = (now.tv_sec - start.tv_sec) * 1000 + (now.tv_usec - start.tv_usec) / 1000;
+        long quiet_ms = (now.tv_sec - last_heard.tv_sec) * 1000 + (now.tv_usec - last_heard.tv_usec) / 1000;
+        // Leave once the sender stops talking, or after the hard limit either way
+        if (elapsed_ms >= LINGER_MAX_MS || quiet_ms >= LINGER_QUIET_MS) break;
+
+        fd_set readfds;
+        struct timeval tv;
+        FD_ZERO(&readfds);
+        FD_SET(sockfd, &readfds);
+        tv.tv_sec = 0;
+        tv.tv_usec = 100000;  // wake up every 100 ms to check the time again
+
+        if (select(sockfd + 1, &readfds, NULL, NULL, &tv) > 0) {
+          if (recvfrom(sockfd, buffer, MSS_SIZE, 0, (struct sockaddr*)&clientaddr, &clientlen) > 0) {
+            recvpkt = (tcp_packet*)buffer;
+            sndpkt = make_packet(0);
+            sndpkt->hdr.ackno = recvpkt->hdr.seqno;
+            sndpkt->hdr.ctr_flags = CTRL_FLAG_ACK;
+            sendto(sockfd, sndpkt, TCP_HDR_SIZE, 0, (struct sockaddr*)&clientaddr, clientlen);
+            free(sndpkt);
+            gettimeofday(&last_heard, NULL);
+            VLOG(LOG_DEBUG, "Re-sent ACK for packet %d after the transfer finished", recvpkt->hdr.seqno);
+          }
+        }
+      }
+
+      VLOG(LOG_INFO, "Shutting down.");
       break;
     }
   }

@@ -29,8 +29,15 @@ The sender reads from `starter/build/sampledata/` and the receiver writes into
 
 Both sides use the `tcp_packet` struct from `packet.h`. Sequence numbers are byte
 offsets into the file, so a packet's `seqno` is where its payload starts. An ACK
-carries `ackno = seqno + data_size` of the packet being acknowledged, which is the
-byte offset right after it. A packet with `data_size == 0` marks the end of the file.
+carries `ackno = seqno` of the packet being acknowledged. A packet with
+`data_size == 0` marks the end of the file.
+
+Each ACK names one exact packet, which is what Selective Repeat needs: the sender
+has up to 10 packets in flight and has to know which one of them got through. An
+earlier version sent back `seqno + data_size` instead, but then the last data
+packet and the end of file packet produce the same number (the EOF packet starts
+exactly where the last data packet ends), so one ACK appeared to acknowledge both
+and the sender could finish while a packet was still missing.
 
 ## Receiver: buffering and in-order delivery
 
@@ -68,3 +75,41 @@ because the EOF overtook it.
 
 The file is written with `pwrite` using the sequence number as the offset, so each
 payload lands in the right place in the output file.
+
+Once the end of file packet has been delivered the receiver does not quit straight
+away. Some of its ACKs may have been lost, which means the sender could still be
+resending packets we already have. If the receiver disappeared at that moment those
+retransmissions would never be answered and the sender would keep retrying until it
+gave up with an error, even though the file was complete. So the receiver stays for
+3 more seconds and replies to anything that arrives before shutting down.
+
+## Sender: window, ACKs and timers
+
+The sender keeps an array of 10 slots, each holding one packet it has sent but not
+yet had acknowledged, along with the time it was last sent. It fills the window as
+long as `next_seqno` is inside `send_base + WND * MAX_DATA_SIZE`, so up to 10
+packets are in flight at once instead of one.
+
+Slots are handed out in order with `total_packets_sent % WND`, and the sender also
+checks that the slot it is about to use is actually free. That check matters because
+the window is measured in bytes while slots are counted per packet: the last packet
+of a file is usually shorter than `MAX_DATA_SIZE`, so the byte test on its own would
+let an eleventh packet out and overwrite a slot still holding an unacknowledged
+packet. That packet would then never be retransmitted and its ACK would match
+nothing, leaving the sender stuck.
+
+The main loop does not block on `recvfrom`. It waits on `select` with a 10 ms
+timeout so it can do three things in turn: send new packets while there is room in
+the window, take in any ACK that arrived, and check its timers.
+
+When an ACK arrives the sender looks for the slot whose `seqno` matches it and marks
+that slot acknowledged. Only when the packet sitting at `send_base` is acknowledged
+does the window slide, and it then keeps sliding over any following packets that are
+already acknowledged. The transfer is finished when the window has slid all the way
+to the end of file packet, not simply when that packet gets an ACK, because the EOF
+can be acknowledged while an earlier packet is still outstanding.
+
+Every unacknowledged slot carries its own `send_time`, which gives each packet its
+own logical timer. If more than 150 ms have passed for a slot, only that packet is
+resent and its timer restarts. That is the selective part: a lost packet does not
+force everything after it to be sent again.
