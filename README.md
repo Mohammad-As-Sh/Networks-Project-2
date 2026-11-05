@@ -25,6 +25,28 @@ mm-delay 5 mm-loss uplink 0.2 mm-loss downlink 0.5
 The sender reads from `starter/build/sampledata/` and the receiver writes into
 `starter/build/receiveddata/`.
 
+## Key design decisions
+
+- An ACK names one packet by its own sequence number, rather than acknowledging
+  everything up to a point. Selective Repeat needs to know which of the packets in
+  flight arrived, and a cumulative ACK cannot say that.
+- The sender window and the receiver buffer are both fixed arrays of 10 entries, so
+  there is no dynamic allocation to manage on either side and the two sides cannot
+  disagree about how much can be outstanding.
+- Each unacknowledged packet carries its own `send_time`, which gives it its own
+  logical timer. The starter used a single SIGALRM timer, which only works when
+  there is one packet in flight.
+- The sender's main loop never blocks on `recvfrom`. It waits on `select` with a
+  10 ms timeout so that sending, handling ACKs and checking timers all keep running.
+- The timeout is a fixed 150 ms rather than an estimated round trip time, which is
+  what the project asks for and is simpler to reason about.
+- The receiver writes with `pwrite` using the sequence number as the file offset, so
+  it never has to track a separate write position.
+- Out-of-order packets are ACKed, not just buffered. If they were only buffered the
+  sender would keep resending packets the receiver already holds.
+- The receiver waits a short while after the transfer instead of exiting at once, so
+  a lost ACK does not leave the sender retransmitting into a void.
+
 ## Packet format
 
 Both sides use the `tcp_packet` struct from `packet.h`. Sequence numbers are byte
