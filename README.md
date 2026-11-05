@@ -1,5 +1,7 @@
 # Networks-Project-2
 
+Yousef Al-Jazzazi and Mohammad Ashar Shaikh
+
 Selective Repeat reliable data transfer over UDP.
 
 ## Build and run
